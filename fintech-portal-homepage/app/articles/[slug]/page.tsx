@@ -55,12 +55,12 @@ export default async function ArticlePage({ params }: Props) {
   function parseMarkdown(content: string): string {
     if (!content) return ""
 
-    let html = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+    // 1. Нормализация и защита символов
+    let text = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
+    text = text.replace(/\\([.~*_`#\-[\](){}+!])/g, "$1") // Разрешаем экранирование
     
-    // Исправленная защита символов
-    html = html.replace(/\\([.~*_`#\-[\](){}+!])/g, "$1")
-
-    const blocks = html.split(/\n{2,}/)
+    // 2. Разделение на Блоки по двум и более переводам строк
+    const blocks = text.split(/\n{2,}/) 
     const processedBlocks: string[] = []
 
     let i = 0
@@ -71,6 +71,64 @@ export default async function ArticlePage({ params }: Props) {
         i++
         continue
       }
+
+      // Таблицы (должны быть проверены первыми, так как используют символы, похожие на параграфы)
+      if (block.includes("|") && block.includes("\n") && (block.trim().startsWith("|") || block.split('\n')[1]?.trim().startsWith("|"))) {
+        // Мы предполагаем, что у вас есть функция parseTable
+        const tableHtml = parseTable(block) 
+        if (tableHtml) {
+          processedBlocks.push(tableHtml)
+          i++
+          continue
+        }
+      }
+
+      // Горизонтальная линия
+      if (/^(\*{3,}|-{3,}|_{3,})$/.test(block)) {
+        processedBlocks.push('<hr class="my-8 border-t-2 border-border" />')
+        i++
+        continue
+      }
+
+      // Заголовки (H1-H6)
+      if (block.startsWith("#")) {
+        // Мы предполагаем, что у вас есть функция parseHeading
+        processedBlocks.push(parseHeading(block))
+        i++
+        continue
+      }
+
+      // Цитаты
+      if (block.startsWith(">")) {
+        // Мы предполагаем, что у вас есть функция parseBlockquote
+        processedBlocks.push(parseBlockquote(block))
+        i++
+        continue
+      }
+
+      // Списки (Маркированные)
+      if (/^[-*•]\s/.test(block)) {
+        // Мы предполагаем, что у вас есть функция parseUnorderedList
+        processedBlocks.push(parseUnorderedList(block))
+        i++
+        continue
+      }
+
+      // Списки (Нумерованные)
+      if (/^\d+\.\s/.test(block)) {
+        // Мы предполагаем, что у вас есть функция parseOrderedList
+        processedBlocks.push(parseOrderedList(block))
+        i++
+        continue
+      }
+
+      // ПАРАГРАФ (должен быть последним, если не совпало ни с чем выше)
+      processedBlocks.push(parseParagraph(block))
+      i++
+    }
+
+    return processedBlocks.join("\n\n")
+  }
 
       // Таблицы
       if (block.includes("|") && block.includes("\n") && (block.trim().startsWith("|") || block.split('\n')[1]?.trim().startsWith("|"))) {
@@ -208,25 +266,48 @@ export default async function ArticlePage({ params }: Props) {
   }
 
   function parseParagraph(block: string): string {
-    const lines = block.split("\n")
-    const formattedLines = lines.map((line) => formatInline(line.trim())).filter(Boolean)
-    const content = formattedLines.join("<br />")
+    // В отличие от предыдущей версии, мы не делаем split("\n"),
+    // а обрабатываем всю строку как один параграф.
+    // Одиночные переносы строк будут проигнорированы, как в стандартном Markdown.
+    
+    // Принудительный <br /> (если в конце строки два пробела) будет обработан уже в formatInline (но его сейчас нет).
+    
+    const content = formatInline(block.trim())
     if (!content) return ""
+    
+    // Если в тексте есть <br />, это должно быть обработано выше.
+    // Сейчас просто оборачиваем отформатированный контент в тег параграфа.
     return `<p class="text-muted-foreground leading-relaxed mb-6 text-base">${content}</p>`
   }
 
   function formatInline(text: string): string {
     if (!text) return ""
     let result = text
-    result = result.replace(/&(?!amp;|lt;|gt;|nbsp;|mdash;|ndash;|quot;)/g, "&amp;")
-    result = result.replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    
+    // 1. Защита от HTML и специальных символов
+    result = result.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+
+    // 2. Изображения: ![alt](url)
     result = result.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, '<img src="$2" alt="$1" class="rounded-lg my-6 max-w-full h-auto shadow-md border border-border block" loading="lazy" />')
+    
+    // 3. Ссылки: [text](url)
     result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-primary hover:text-primary/80 hover:underline font-medium transition-colors">$1</a>')
-    result = result.replace(/(\*\*\*|___)(.*?)\1/g, '<strong class="font-bold text-foreground"><em>$2</em></strong>')
-    result = result.replace(/(\*\*|__)(.*?)\1/g, '<strong class="font-bold text-foreground">$2</strong>')
-    result = result.replace(/(\*|_)(.*?)\1/g, '<em class="italic">$2</em>')
+    
+    // 4. Код: `code`
     result = result.replace(/`([^`]+)`/g, '<code class="bg-muted px-1.5 py-0.5 rounded text-sm font-mono text-foreground border border-border">$1</code>')
+    
+    // 5. Жирный и Курсив (***, ___): Жирный курсив
+    result = result.replace(/(\*\*\*|___)(.*?)\1/g, '<strong class="font-bold text-foreground"><em>$2</em></strong>')
+    
+    // 6. Жирный (** или __): Жирный
+    result = result.replace(/(\*\*|__)(.*?)\1/g, '<strong class="font-bold text-foreground">$2</strong>')
+    
+    // 7. Курсив (* или _): Курсив
+    result = result.replace(/(\*|_)(.*?)\1/g, '<em class="italic">$2</em>')
+    
+    // 8. Стрелки (для красоты)
     result = result.replace(/->/g, "→").replace(/<-/g, "←")
+    
     return result
   }
 
