@@ -33,24 +33,29 @@ export default async function ArticlePage({ params }: { params: { slug: string }
     notFound()
   }
 
-  const formattedDate = new Date(article.date).toLocaleDateString("ru-RU", {
-    year: "numeric",
-    month: "long",
-    day: "numeric",
-  })
+  // Защита от некорректной даты
+  let formattedDate = ""
+  try {
+    formattedDate = new Date(article.date).toLocaleDateString("ru-RU", {
+      year: "numeric",
+      month: "long",
+      day: "numeric",
+    })
+  } catch (e) {
+    formattedDate = article.date // Fallback если дата не парсится
+  }
 
   function parseMarkdown(content: string): string {
-    // Нормализуем переносы строк
+    if (!content) return "" // Защита от пустого контента
+
+    // 1. Нормализуем переносы строк
     let html = content.replace(/\r\n/g, "\n").replace(/\r/g, "\n")
 
-    // Убираем экранирование специальных символов
-    html = html.replace(/\\([.~*_`#\-[\](){}+!|])/g, "$1")
+    // 2. Убираем экранирование (аккуратно, чтобы не сломать таблицы с |)
+    // Оставляем экранированные пайпы \| для таблиц, остальные убираем
+    html = html.replace(/\\([.~*_`#\-[\](){}+!])/g, "$1")
 
-    // Заменяем стрелки
-    html = html.replace(/->/g, "→")
-    html = html.replace(/<-/g, "←")
-
-    // Разбиваем на блоки для обработки
+    // 3. Разбиваем на блоки по двойному переносу строки
     const blocks = html.split(/\n{2,}/)
     const processedBlocks: string[] = []
 
@@ -63,8 +68,9 @@ export default async function ArticlePage({ params }: { params: { slug: string }
         continue
       }
 
-      // Проверяем таблицу (начинается с |)
-      if (block.startsWith("|") && block.includes("\n")) {
+      // --- Таблицы ---
+      // Проверяем, начинается ли блок с | (или содержит структуру таблицы)
+      if (block.includes("|") && block.includes("\n") && (block.trim().startsWith("|") || block.split('\n')[1]?.trim().startsWith("|"))) {
         const tableHtml = parseTable(block)
         if (tableHtml) {
           processedBlocks.push(tableHtml)
@@ -73,42 +79,42 @@ export default async function ArticlePage({ params }: { params: { slug: string }
         }
       }
 
-      // Горизонтальная линия
-      if (/^(-{3,}|_{3,}|\*{3,})$/.test(block)) {
+      // --- Горизонтальная линия ---
+      if (/^(\*{3,}|-{3,}|_{3,})$/.test(block)) {
         processedBlocks.push('<hr class="my-8 border-t-2 border-border" />')
         i++
         continue
       }
 
-      // Заголовки
+      // --- Заголовки ---
       if (block.startsWith("#")) {
         processedBlocks.push(parseHeading(block))
         i++
         continue
       }
 
-      // Цитаты
+      // --- Цитаты ---
       if (block.startsWith(">")) {
         processedBlocks.push(parseBlockquote(block))
         i++
         continue
       }
 
-      // Списки (маркированные)
+      // --- Списки (маркированные) ---
       if (/^[-*•]\s/.test(block)) {
         processedBlocks.push(parseUnorderedList(block))
         i++
         continue
       }
 
-      // Списки (нумерованные)
+      // --- Списки (нумерованные) ---
       if (/^\d+\.\s/.test(block)) {
         processedBlocks.push(parseOrderedList(block))
         i++
         continue
       }
 
-      // Обычный параграф
+      // --- Обычный параграф ---
       processedBlocks.push(parseParagraph(block))
       i++
     }
@@ -120,14 +126,21 @@ export default async function ArticlePage({ params }: { params: { slug: string }
     const lines = block.split("\n").filter((line) => line.trim())
     if (lines.length < 2) return null
 
-    // Проверяем, что вторая строка - разделитель
-    const separatorLine = lines[1]
-    if (!/^\|[\s\-:|]+\|$/.test(separatorLine.trim())) return null
+    // Проверяем строку-разделитель (например: |---|---|)
+    const separatorLine = lines[1].trim()
+    // Упрощенная проверка разделителя: должен содержать |, -, : и пробелы
+    if (!/^\|?[\s\-:|]+\|?$/.test(separatorLine)) return null
 
     const headerCells = lines[0]
       .split("|")
-      .map((c) => c.trim())
-      .filter(Boolean)
+      .map(c => c.trim())
+      .filter((_, index, arr) => {
+        // Фильтруем пустые ячейки только по краям, если таблица в Markdown закрыта пайпами
+        if (index === 0 && lines[0].trim().startsWith("|") && _ === "") return false;
+        if (index === arr.length - 1 && lines[0].trim().endsWith("|") && _ === "") return false;
+        return true;
+      });
+
     const headerHtml = headerCells
       .map(
         (h) =>
@@ -140,8 +153,13 @@ export default async function ArticlePage({ params }: { params: { slug: string }
       .map((row) => {
         const cells = row
           .split("|")
-          .map((c) => c.trim())
-          .filter(Boolean)
+          .map(c => c.trim())
+           .filter((_, index, arr) => {
+            if (index === 0 && row.trim().startsWith("|") && _ === "") return false;
+            if (index === arr.length - 1 && row.trim().endsWith("|") && _ === "") return false;
+            return true;
+          });
+          
         const cellsHtml = cells
           .map((c) => `<td class="border border-border px-4 py-3 text-muted-foreground">${formatInline(c)}</td>`)
           .join("")
@@ -182,10 +200,10 @@ export default async function ArticlePage({ params }: { params: { slug: string }
     const listItems = items
       .map((item) => {
         const text = item.replace(/^[-*•]\s+/, "")
-        return `<li class="text-muted-foreground leading-relaxed">${formatInline(text)}</li>`
+        return `<li class="text-muted-foreground leading-relaxed pl-2">${formatInline(text)}</li>`
       })
       .join("")
-    return `<ul class="list-disc list-outside ml-6 my-6 space-y-2">${listItems}</ul>`
+    return `<ul class="list-disc list-outside ml-6 my-6 space-y-2 marker:text-accent">${listItems}</ul>`
   }
 
   function parseOrderedList(block: string): string {
@@ -193,22 +211,19 @@ export default async function ArticlePage({ params }: { params: { slug: string }
     const listItems = items
       .map((item) => {
         const text = item.replace(/^\d+\.\s+/, "")
-        return `<li class="text-muted-foreground leading-relaxed">${formatInline(text)}</li>`
+        return `<li class="text-muted-foreground leading-relaxed pl-2">${formatInline(text)}</li>`
       })
       .join("")
-    return `<ol class="list-decimal list-outside ml-6 my-6 space-y-2">${listItems}</ol>`
+    return `<ol class="list-decimal list-outside ml-6 my-6 space-y-2 marker:text-accent">${listItems}</ol>`
   }
 
   function parseParagraph(block: string): string {
-    // Обрабатываем переносы строк внутри параграфа
     const lines = block.split("\n")
     const formattedLines = lines.map((line) => formatInline(line.trim())).filter(Boolean)
-
-    // Если строки разделены одиночным переносом, объединяем с <br>
     const content = formattedLines.join("<br />")
 
     if (!content) return ""
-    return `<p class="text-muted-foreground leading-relaxed mb-6">${content}</p>`
+    return `<p class="text-muted-foreground leading-relaxed mb-6 text-base">${content}</p>`
   }
 
   function formatInline(text: string): string {
@@ -216,66 +231,69 @@ export default async function ArticlePage({ params }: { params: { slug: string }
 
     let result = text
 
-    // Защита HTML-символов
+    // 1. Защита HTML (кроме уже безопасных сущностей)
     result = result.replace(/&(?!amp;|lt;|gt;|nbsp;|mdash;|ndash;|quot;)/g, "&amp;")
+    result = result.replace(/</g, "&lt;").replace(/>/g, "&gt;")
 
-    // Изображения (до ссылок)
+    // 2. Изображения: ![Alt](src)
+    // ИСПРАВЛЕНО: Заменены $$ на экранированные скобки \( и \)
     result = result.replace(
-      /!\[([^\]]*)\]$$([^)]+)$$/g,
-      '<img src="$2" alt="$1" class="rounded-lg my-6 max-w-full inline-block" />',
+      /!\[([^\]]*)\]\(([^)]+)\)/g,
+      '<img src="$2" alt="$1" class="rounded-lg my-6 max-w-full h-auto shadow-md border border-border block" loading="lazy" />',
     )
 
-    // Ссылки
+    // 3. Ссылки: [Text](url)
+    // ИСПРАВЛЕНО: Заменены $$ на экранированные скобки \( и \)
     result = result.replace(
-      /\[([^\]]+)\]$$([^)]+)$$/g,
-      '<a href="$2" class="text-accent hover:underline font-medium">$1</a>',
+      /\[([^\]]+)\]\(([^)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener noreferrer" class="text-primary hover:text-primary/80 hover:underline font-medium transition-colors">$1</a>',
     )
 
-    // Жирный + курсив
-    result = result.replace(/\*\*\*([^*]+)\*\*\*/g, '<strong class="font-bold text-foreground"><em>$1</em></strong>')
-    result = result.replace(/___([^_]+)___/g, '<strong class="font-bold text-foreground"><em>$1</em></strong>')
+    // 4. Жирный + Курсив: ***text*** или ___text___
+    result = result.replace(/(\*\*\*|___)(.*?)\1/g, '<strong class="font-bold text-foreground"><em>$2</em></strong>')
 
-    // Жирный текст
-    result = result.replace(/\*\*([^*]+)\*\*/g, '<strong class="font-bold text-foreground">$1</strong>')
-    result = result.replace(/__([^_]+)__/g, '<strong class="font-bold text-foreground">$1</strong>')
+    // 5. Жирный: **text** или __text__
+    result = result.replace(/(\*\*|__)(.*?)\1/g, '<strong class="font-bold text-foreground">$2</strong>')
 
-    // Курсив
-    result = result.replace(/\*([^*]+)\*/g, '<em class="italic">$1</em>')
-    result = result.replace(/_([^_]+)_/g, '<em class="italic">$1</em>')
+    // 6. Курсив: *text* или _text_
+    result = result.replace(/(\*|_)(.*?)\1/g, '<em class="italic">$2</em>')
 
-    // Инлайн-код
+    // 7. Инлайн код: `text`
     result = result.replace(
       /`([^`]+)`/g,
-      '<code class="bg-muted px-2 py-1 rounded text-sm font-mono text-accent">$1</code>',
+      '<code class="bg-muted px-1.5 py-0.5 rounded text-sm font-mono text-foreground border border-border">$1</code>',
     )
+
+    // 8. Стрелочки (красивости)
+    result = result.replace(/->/g, "→").replace(/<-/g, "←")
 
     return result
   }
 
-  const renderedContent = parseMarkdown(article.content)
+  const renderedContent = parseMarkdown(article.content || "")
 
   return (
     <main className="min-h-screen bg-background">
       <article className="container mx-auto px-4 sm:px-6 lg:px-8 py-12 max-w-4xl">
         <Link
           href="/articles"
-          className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-8"
+          className="inline-flex items-center gap-2 text-sm text-muted-foreground hover:text-foreground transition-colors mb-8 group"
         >
-          <ArrowLeft className="h-4 w-4" />
+          <ArrowLeft className="h-4 w-4 transition-transform group-hover:-translate-x-1" />
           Все статьи
         </Link>
 
-        <header className="mb-8">
-          <Badge className="mb-4 bg-accent text-accent-foreground">{article.category}</Badge>
-          <h1 className="text-3xl sm:text-4xl lg:text-5xl font-bold tracking-tight text-foreground mb-4">
+        <header className="mb-8 border-b border-border pb-8">
+          <Badge className="mb-4 bg-primary text-primary-foreground hover:bg-primary/90">{article.category}</Badge>
+          <h1 className="text-3xl sm:text-4xl lg:text-5xl font-extrabold tracking-tight text-foreground mb-4 leading-tight">
             {article.title}
           </h1>
-          <p className="text-lg text-muted-foreground mb-6">{article.description}</p>
+          <p className="text-lg text-muted-foreground mb-6 leading-relaxed">{article.description}</p>
 
-          <div className="flex items-center gap-6 text-sm text-muted-foreground">
+          <div className="flex flex-wrap items-center gap-6 text-sm text-muted-foreground font-medium">
             <div className="flex items-center gap-2">
               <Calendar className="h-4 w-4" />
-              <span>{formattedDate}</span>
+              <time dateTime={article.date}>{formattedDate}</time>
             </div>
             <div className="flex items-center gap-2">
               <Clock className="h-4 w-4" />
@@ -284,21 +302,30 @@ export default async function ArticlePage({ params }: { params: { slug: string }
           </div>
         </header>
 
-        <div className="relative aspect-video overflow-hidden rounded-xl mb-10">
-          <img src={article.image || "/placeholder.svg"} alt={article.title} className="h-full w-full object-cover" />
-        </div>
+        {article.image && (
+          <div className="relative aspect-video overflow-hidden rounded-xl mb-10 border border-border bg-muted">
+            <img 
+              src={article.image} 
+              alt={article.title} 
+              className="h-full w-full object-cover transition-transform hover:scale-105 duration-700" 
+            />
+          </div>
+        )}
 
+        {/* Используем отдельный div для контента статьи с правильными стилями типографики.
+            Обрати внимание, стили внутри parseMarkdown теперь добавляют классы Tailwind напрямую.
+        */}
         <div
-          className="prose prose-lg max-w-none prose-headings:text-foreground prose-p:text-muted-foreground prose-strong:text-foreground prose-a:text-accent"
+          className="article-content"
           dangerouslySetInnerHTML={{ __html: renderedContent }}
         />
 
-        <div className="mt-12 pt-8 border-t border-border">
+        <div className="mt-12 pt-8 border-t border-border flex justify-between items-center">
           <Link
             href="/articles"
-            className="inline-flex items-center gap-2 text-accent hover:text-accent/80 transition-colors font-medium"
+            className="inline-flex items-center gap-2 text-primary hover:text-primary/80 transition-colors font-medium group"
           >
-            <ArrowLeft className="h-4 w-4" />
+            <ArrowLeft className="h-4 w-4 transition-transform group-hover:-translate-x-1" />
             Вернуться к статьям
           </Link>
         </div>
